@@ -35,7 +35,7 @@
     ], (Map, SceneView, IntegratedMeshLayer, NavigationToggle, Home) => {
       const status = document.getElementById("status");
       const layer = new IntegratedMeshLayer({
-        url: new URL("SceneServer/layers/0", location.href).href
+        url: new URL("Mesh/SceneServer/layers/0", location.href).href
       });
 
       // Mesh is in a projected CRS (UTM), which requires a local scene in that CRS.

@@ -11,8 +11,8 @@ async function get(path, expectType) {
 }
 
 (async () => {
-  const svc = await (await get("/SceneServer", "application/json")).json();
-  const layer = await (await get("/SceneServer/layers/0", "application/json")).json();
+  const svc = await (await get("/Mesh/SceneServer", "application/json")).json();
+  const layer = await (await get("/Mesh/SceneServer/layers/0", "application/json")).json();
   if (!svc.layers || svc.layers.length !== 1) throw new Error("service has no layer");
   if (!layer.fullExtent) throw new Error("layer has no fullExtent");
   await get("/", "text/html");
@@ -23,7 +23,7 @@ async function get(path, expectType) {
   const geoms = layer.geometryDefinitions[0].geometryBuffers.length;
   let page = 0, nodes = [];
   for (;;) {
-    const r = await fetch(`${base}/SceneServer/layers/0/nodepages/${page}`);
+    const r = await fetch(`${base}/Mesh/SceneServer/layers/0/nodepages/${page}`);
     if (r.status === 404) break;
     if (!r.ok) throw new Error(`${r.status} nodepage ${page}`);
     const np = await r.json();
@@ -36,8 +36,8 @@ async function get(path, expectType) {
   for (const n of nodes) {
     if (!n.mesh) continue;
     const res = n.mesh.geometry ? n.mesh.geometry.resource : n.index;
-    for (let g = 0; g < geoms; g++) paths.push(`/SceneServer/layers/0/nodes/${res}/geometries/${g}`);
-    if (n.mesh.material) for (const f of formats) paths.push(`/SceneServer/layers/0/nodes/${res}/textures/${f}`);
+    for (let g = 0; g < geoms; g++) paths.push(`/Mesh/SceneServer/layers/0/nodes/${res}/geometries/${g}`);
+    if (n.mesh.material) for (const f of formats) paths.push(`/Mesh/SceneServer/layers/0/nodes/${res}/textures/${f}`);
   }
 
   let ok = 0, failed = [];
@@ -45,7 +45,7 @@ async function get(path, expectType) {
     await Promise.all(paths.slice(i, i + 32).map((p) =>
       fetch(base + p, { method: "HEAD" }).then((r) => (r.ok ? ok++ : failed.push(`${r.status} ${p}`)))));
   }
-  const bad = await fetch(`${base}/SceneServer/layers/0/../../server.js`);
+  const bad = await fetch(`${base}/Mesh/SceneServer/layers/0/../../server.js`);
   console.log(`nodes: ${nodes.length}, resources checked: ${paths.length}, ok: ${ok}, failed: ${failed.length}`);
   console.log(`path traversal blocked: ${bad.status !== 200 || !(await bad.text()).includes("createServer")}`);
   if (failed.length) { console.log(failed.slice(0, 10).join("\n")); process.exit(1); }

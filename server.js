@@ -1,9 +1,9 @@
 // Minimal I3S SceneServer for an extracted SLPK. No dependencies.
 // Routes:
 //   /                                   -> public/index.html
-//   /SceneServer                        -> service document
-//   /SceneServer/layers/0               -> layer document (3dSceneLayer.json.gz)
-//   /SceneServer/layers/0/<resource>    -> nodepages, geometries, textures, ...
+//   /<name>/SceneServer                     -> service document
+//   /<name>/SceneServer/layers/0            -> layer document (3dSceneLayer.json.gz)
+//   /<name>/SceneServer/layers/0/<resource> -> nodepages, geometries, textures, ...
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -83,12 +83,17 @@ http.createServer((req, res) => {
   catch { return send(req, res, 400, "Bad request", "text/plain"); }
 
   if (p === "/healthz") return send(req, res, 200, "ok", "text/plain");
-  if (p === "/SceneServer") return send(req, res, 200, serviceBody, "application/json", { "Cache-Control": "public, max-age=3600" });
-  if (p === "/SceneServer/layers/0") return send(req, res, 200, layerBody, "application/json", { "Cache-Control": "public, max-age=3600" });
 
-  const m = p.match(/^\/SceneServer\/layers\/0\/(.+)$/);
-  if (m) {
-    const file = resolveResource(m[1]);
+  // The ArcGIS JS API only recognizes ".../<ServiceName>/SceneServer" URLs, so the
+  // service lives at /<name>/SceneServer. A bare /SceneServer is accepted too.
+  const svc = p.match(/^(?:\/[^/]+)?\/SceneServer(\/.*)?$/);
+  if (svc) {
+    const rest = svc[1] || "";
+    const json = { "Cache-Control": "public, max-age=3600" };
+    if (rest === "") return send(req, res, 200, serviceBody, "application/json", json);
+    if (rest === "/layers/0") return send(req, res, 200, layerBody, "application/json", json);
+    const m = rest.match(/^\/layers\/0\/(.+)$/);
+    const file = m && resolveResource(m[1]);
     return file ? sendFile(req, res, file, "public, max-age=604800, immutable")
                 : send(req, res, 404, JSON.stringify({ error: { code: 404, message: "Not found" } }), "application/json");
   }

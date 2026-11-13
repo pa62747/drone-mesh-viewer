@@ -1,0 +1,14 @@
+{
+  "name": "drone-mesh-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web viewer and I3S server for a Drone2Map integrated mesh (extracted SLPK)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/check.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

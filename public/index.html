@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>מודל תלת-ממדי</title>
+  <link rel="stylesheet" href="https://js.arcgis.com/4.32/esri/themes/dark/main.css">
+  <style>
+    html, body, #viewDiv { margin: 0; padding: 0; width: 100%; height: 100%; background: #1e2024; }
+    #panel {
+      position: absolute; top: 12px; right: 12px; z-index: 10; max-width: calc(100% - 24px);
+      background: rgba(30, 32, 36, .88); color: #e8e8e8; border-radius: 8px; padding: 10px 14px;
+      font: 14px/1.4 system-ui, "Segoe UI", Arial, sans-serif; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+    #panel h1 { font-size: 16px; margin: 0 0 4px; }
+    #status { font-size: 12px; color: #aab; }
+    #status.err { color: #ff8a80; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <h1>מודל תלת-ממדי</h1>
+    <div id="status">טוען…</div>
+  </div>
+  <div id="viewDiv"></div>
+
+  <script src="https://js.arcgis.com/4.32/"></script>
+  <script>
+    require([
+      "esri/Map",
+      "esri/views/SceneView",
+      "esri/layers/IntegratedMeshLayer",
+      "esri/widgets/NavigationToggle",
+      "esri/widgets/Home"
+    ], (Map, SceneView, IntegratedMeshLayer, NavigationToggle, Home) => {
+      const status = document.getElementById("status");
+      const layer = new IntegratedMeshLayer({
+        url: new URL("SceneServer/layers/0", location.href).href
+      });
+
+      // Mesh is in a projected CRS (UTM), which requires a local scene in that CRS.
+      // Web basemaps are Web Mercator, so the scene shows the mesh without a basemap.
+      const map = new Map({ layers: [layer] });
+      map.ground.opacity = 0;
+      map.ground.navigationConstraint = { type: "none" };
+
+      layer.load().then(() => {
+        const view = new SceneView({
+          container: "viewDiv",
+          map,
+          viewingMode: "local",
+          spatialReference: layer.spatialReference,
+          environment: {
+            background: { type: "color", color: [30, 32, 36, 1] },
+            starsEnabled: false,
+            atmosphereEnabled: false,
+            lighting: { type: "virtual" }
+          },
+          qualityProfile: "high"
+        });
+        view.ui.add(new NavigationToggle({ view }), "top-left");
+        view.when(() => view.goTo({ target: layer.fullExtent, tilt: 55 }, { animate: false }))
+          .then(() => {
+            view.ui.add(new Home({ view }), "top-left");
+            status.textContent = "גרירה: סיבוב · גלגלת: זום · מקש ימני: הזזה";
+          })
+          .catch((e) => { status.textContent = "שגיאה בהצגה: " + e.message; status.className = "err"; });
+      }).catch((e) => {
+        status.textContent = "שגיאה בטעינת השכבה: " + e.message;
+        status.className = "err";
+      });
+    });
+  </script>
+</body>
+</html>

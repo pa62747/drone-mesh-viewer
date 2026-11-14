@@ -22,8 +22,9 @@ Render picks up `render.yaml` (Node web service, free plan).
 - Mask: only the part of the mesh inside `public/mask.json` (the `Mask` polygon from the Drone2Map project GDB) is shown; toggle in the panel
 - Satellite: Esri World Imagery, reprojected in the browser to UTM 36N tiles (the scene is local in the mesh CRS)
 - 3D tools: distance, area, elevation profile, line of sight, slice, 3D swipe (vertical slice plane on a slider), daylight with shadows, shadow cast (hours in shade), coordinates with real heights, eye-level walk mode
-- Walk mode follows `public/ground.json`: a 1 m bare-earth grid built from the Drone2Map solution points (per-cell minimum, outlier removal, 31 m morphological opening, smoothing). No wall collision.
-- The mesh is lowered by `GROUND` (303 m) so it sits on the flat satellite ground; coordinate readouts add it back
+- Terrain: free global DEM (AWS Terrain Tiles, Mapzen Terrarium, SRTM-based, metres above sea level) re-tiled into UTM in the browser by a custom `BaseElevationLayer`. Near the mesh it is refined by `public/ground.json`: a 1 m bare-earth grid built from the Drone2Map solution points (per-cell minimum, outlier removal, 31 m morphological opening, smoothing). While the mask is on, the drone ground is limited to the mask area; it is capped at DEM + 3 m. The mesh is shown at its true heights.
+- Measured fit, DEM minus drone ground over 870 points: mean +0.4 m, median +1.3 m, std 3.8 m
+- Walk mode keeps the eye above the same terrain. No wall collision.
 
 ## Tests
 ```

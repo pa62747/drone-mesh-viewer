@@ -69,7 +69,7 @@
   <script src="https://js.arcgis.com/4.32/"></script>
   <script>
   require([
-    "esri/intl", "esri/Map", "esri/Basemap", "esri/views/SceneView",
+    "esri/intl", "esri/Map", "esri/Basemap", "esri/Camera", "esri/views/SceneView",
     "esri/layers/IntegratedMeshLayer", "esri/layers/BaseTileLayer", "esri/layers/support/TileInfo",
     "esri/layers/support/SceneModification", "esri/layers/support/SceneModifications",
     "esri/geometry/Polygon", "esri/geometry/Point", "esri/geometry/projection",
@@ -78,7 +78,7 @@
     "esri/widgets/ElevationProfile", "esri/widgets/LineOfSight", "esri/widgets/Slice",
     "esri/widgets/Daylight", "esri/widgets/ShadowCast",
     "esri/widgets/NavigationToggle", "esri/widgets/Home", "esri/widgets/Fullscreen"
-  ], (intl, Map, Basemap, SceneView, IntegratedMeshLayer, BaseTileLayer, TileInfo,
+  ], (intl, Map, Basemap, Camera, SceneView, IntegratedMeshLayer, BaseTileLayer, TileInfo,
       SceneModification, SceneModifications, Polygon, Point, projection,
       SliceAnalysis, SlicePlane,
       DirectLineMeasurement3D, AreaMeasurement3D, ElevationProfile, LineOfSight, Slice,
@@ -227,7 +227,8 @@
             visibleElements: { timezone: true, playButtons: true, shadowsToggle: true, sunLightingToggle: false } })) },
         { id: "shadow", label: "הצללה מצטברת", hint: "כמה שעות כל אזור נמצא בצל ביום שנבחר, בטווח השעות שנבחר.",
           run: (el) => widget(new ShadowCast({ view, container: el })) },
-        { id: "coords", label: "קואורדינטות", hint: "לחיצה על נקודה במודל מציגה את מיקומה ואת הגובה האמיתי שלה.", run: coordsTool }
+        { id: "coords", label: "קואורדינטות", hint: "לחיצה על נקודה במודל מציגה את מיקומה ואת הגובה האמיתי שלה.", run: coordsTool },
+        { id: "walk", label: "הליכה", hint: "תנועה בגובה העיניים על פני הקרקע. לחיצה על נקודה מתחילה את ההליכה, ולחיצה נוספת מעבירה לנקודה אחרת.", run: walkTool }
       ];
 
       const toolsEl = $("tools");
@@ -297,6 +298,114 @@
         el.querySelector("#swipeFlip").onclick = () => { flip = !flip; update(); };
         update();
         return () => view.analyses.remove(analysis);
+      }
+
+      // ---- eye-level walk mode ----
+      // Bare-earth heights (ground.json, built from the Drone2Map solution points) keep the eye at a fixed
+      // height above the terrain. There is no collision with walls: walking through buildings is allowed.
+      let groundGrid = null;
+      const loadGround = async () => {
+        if (groundGrid) return groundGrid;
+        const g = await (await fetch("ground.json")).json();
+        g.values = new Int16Array(Uint8Array.from(atob(g.data), (ch) => ch.charCodeAt(0)).buffer);
+        return (groundGrid = g);
+      };
+      const groundAt = (x, y) => { // bilinear, real height (m, EGM96)
+        const g = groundGrid;
+        const c = Math.min(Math.max((x - g.x0) / g.cell, 0), g.cols - 1.001);
+        const r = Math.min(Math.max((g.y1 - y) / g.cell, 0), g.rows - 1.001);
+        const c0 = Math.floor(c), r0 = Math.floor(r), fc = c - c0, fr = r - r0, v = (rr, cc) => g.values[rr * g.cols + cc];
+        const top = v(r0, c0) * (1 - fc) + v(r0, c0 + 1) * fc, bot = v(r0 + 1, c0) * (1 - fc) + v(r0 + 1, c0 + 1) * fc;
+        return g.base + (top * (1 - fr) + bot * fr) / 100;
+      };
+
+      function walkTool(el) {
+        el.innerHTML = `
+          <div class="pad" id="walkMsg">לחצו על נקודה בסצנה כדי לעמוד בה.</div>
+          <div class="pad"><label for="walkEye">גובה עיניים: <b id="walkEyeVal">1.7</b> מ'</label>
+            <input type="range" id="walkEye" min="1" max="2.2" step="0.1" value="1.7"></div>
+          <div class="pad" style="font-size:12px;color:var(--muted)">
+            W / ↑ קדימה · S / ↓ אחורה · A / D צעד הצידה · ← → סיבוב · גרירה בעכבר: הסתכלות · Shift: ריצה</div>
+          <div class="seg" id="walkPad">
+            <button data-k="arrowleft">↶ סיבוב</button><button data-k="w">▲ קדימה</button>
+            <button data-k="s">▼ אחורה</button><button data-k="arrowright">סיבוב ↷</button>
+          </div>`;
+        const msg = el.querySelector("#walkMsg");
+        const saved = view.camera.clone();
+        const keys = new Set();
+        const MOVE = new Set(["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "shift"]);
+        let walking = false, x = 0, y = 0, heading = view.camera.heading, tilt = 90, eye = 1.7, raf = 0, last = 0, dirty = true, drag = null;
+
+        const apply = () => {
+          view.camera = new Camera({ position: new Point({ x, y, z: groundAt(x, y) - GROUND + eye, spatialReference: sr }),
+            heading, tilt, fov: 70 });
+          msg.textContent = `גובה קרקע ${groundAt(x, y).toFixed(1)} מ' · עיניים ${(groundAt(x, y) + eye).toFixed(1)} מ'`;
+          dirty = false;
+        };
+        const tick = (t) => {
+          const dt = Math.min(0.5, (t - (last || t)) / 1000); last = t; // generous cap keeps speed right at low frame rates
+          const k = (a, b) => keys.has(a) || keys.has(b);
+          const fwd = (k("w", "arrowup") ? 1 : 0) - (k("s", "arrowdown") ? 1 : 0);
+          const side = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
+          const turn = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
+          if (fwd || side || turn) {
+            const speed = keys.has("shift") ? 4 : 1.4, h = heading * Math.PI / 180;
+            x += (Math.sin(h) * fwd + Math.cos(h) * side) * speed * dt;
+            y += (Math.cos(h) * fwd - Math.sin(h) * side) * speed * dt;
+            heading = (heading + turn * 60 * dt + 360) % 360;
+            dirty = true;
+          }
+          if (dirty) apply();
+          raf = requestAnimationFrame(tick);
+        };
+        const startAt = (px, py) => {
+          x = px; y = py;
+          if (!walking) { walking = true; heading = view.camera.heading; raf = requestAnimationFrame(tick); }
+          dirty = true;
+        };
+
+        const handles = [
+          view.on("click", async (e) => {
+            e.stopPropagation();
+            await loadGround();
+            const hit = await view.hitTest(e);
+            const p = (hit.results.find((r) => r.mapPoint) || {}).mapPoint || view.toMap(e);
+            if (p) startAt(p.x, p.y);
+          }),
+          view.on("drag", (e) => {
+            if (!walking) return;
+            e.stopPropagation();
+            if (e.action === "start") drag = { x: e.x, y: e.y };
+            else if (drag) {
+              heading = (heading - (e.x - drag.x) * 0.25 + 360) % 360;
+              tilt = Math.min(150, Math.max(30, tilt + (e.y - drag.y) * 0.2));
+              drag = e.action === "end" ? null : { x: e.x, y: e.y }; dirty = true;
+            }
+          }),
+          view.on("mouse-wheel", (e) => walking && e.stopPropagation()),
+          view.on("key-down", (e) => { const k = e.key.toLowerCase(); if (walking && MOVE.has(k)) { e.stopPropagation(); keys.add(k); } }),
+          view.on("key-up", (e) => keys.delete(e.key.toLowerCase()))
+        ];
+        const onUp = (e) => keys.delete(e.key.toLowerCase());
+        const onBlur = () => keys.clear();
+        window.addEventListener("keyup", onUp); window.addEventListener("blur", onBlur);
+
+        el.querySelector("#walkEye").oninput = (e) => {
+          eye = +e.target.value; el.querySelector("#walkEyeVal").textContent = eye.toFixed(1); dirty = true;
+        };
+        el.querySelectorAll("#walkPad button").forEach((b) => {
+          const k = b.dataset.k;
+          b.onpointerdown = (e) => { e.preventDefault(); keys.add(k); };
+          b.onpointerup = b.onpointerleave = b.onpointercancel = () => keys.delete(k);
+        });
+        loadGround().catch((e) => { msg.textContent = "שגיאה בטעינת גובה הקרקע: " + e.message; });
+
+        return () => {
+          cancelAnimationFrame(raf);
+          handles.forEach((h) => h.remove());
+          window.removeEventListener("keyup", onUp); window.removeEventListener("blur", onBlur);
+          if (walking) view.goTo(saved);
+        };
       }
 
       // ---- coordinate picker with real heights ----

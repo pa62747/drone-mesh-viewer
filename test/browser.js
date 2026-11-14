@@ -76,6 +76,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   await evaluate("document.getElementById('panelClose').click()");
 
+  // walk mode: click a point in the scene, hold W, check the camera moved at eye height
+  if (ids.includes("walk")) {
+    await evaluate(`document.querySelector('#tools button[data-id="walk"]').click()`);
+    await sleep(1500);
+    const mouse = (type) => send("Input.dispatchMouseEvent", { type, x: 520, y: 520, button: "left", clickCount: 1 });
+    await mouse("mousePressed"); await mouse("mouseReleased");
+    for (let i = 0; i < 40; i++) {
+      await sleep(250);
+      if ((await evaluate("document.getElementById('walkMsg').textContent")).startsWith("גובה קרקע")) break;
+    }
+    await sleep(500);
+    const cam = "(() => { const c = window.view.camera; return { x: +c.position.x.toFixed(2), y: +c.position.y.toFixed(2), z: +c.position.z.toFixed(2), tilt: +c.tilt.toFixed(1), heading: +c.heading.toFixed(1) }; })()";
+    const c1 = await evaluate(cam);
+    console.log("walk start camera:", JSON.stringify(c1), "msg:", await evaluate("document.getElementById('walkMsg').textContent"));
+    const key = (type) => send("Input.dispatchKeyEvent", { type, key: "w", code: "KeyW", windowsVirtualKeyCode: 87 });
+    await key("keyDown"); await sleep(1500); await key("keyUp");
+    await sleep(800);
+    const c2 = await evaluate(cam);
+    console.log("walk after W 1.5s:", JSON.stringify(c2), "moved m:", Math.hypot(c2.x - c1.x, c2.y - c1.y).toFixed(2));
+    await waitIdle(20000); await shot("04-walk");
+    await evaluate("document.getElementById('panelClose').click()");
+    await sleep(1500);
+    console.log("camera restored after exit, tilt:", (await evaluate(cam)).tilt);
+  }
+
   console.log("errors:", errors.length ? "\n  " + errors.join("\n  ") : "none");
   ws.close(); proc.kill();
   setTimeout(() => process.exit(0), 300);

@@ -21,7 +21,8 @@ Render picks up `render.yaml` (Node web service, free plan).
 ## Viewer features
 - Mask: only the part of the mesh inside `public/mask.json` (the `Mask` polygon from the Drone2Map project GDB) is shown; toggle in the panel
 - Satellite: Esri World Imagery, reprojected in the browser to UTM 36N tiles (the scene is local in the mesh CRS)
-- 3D tools: distance, area, elevation profile, line of sight, slice, 3D swipe (vertical slice plane on a slider), daylight with shadows, shadow cast (hours in shade), coordinates with real heights
+- 3D tools: distance, area, elevation profile, line of sight, slice, 3D swipe (vertical slice plane on a slider), daylight with shadows, shadow cast (hours in shade), coordinates with real heights, eye-level walk mode
+- Walk mode follows `public/ground.json`: a 1 m bare-earth grid built from the Drone2Map solution points (per-cell minimum, outlier removal, 31 m morphological opening, smoothing). No wall collision.
 - The mesh is lowered by `GROUND` (303 m) so it sits on the flat satellite ground; coordinate readouts add it back
 
 ## Tests

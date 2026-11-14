@@ -17,3 +17,15 @@ Delete `data/`, extract a new `.slpk` into it (it is a plain zip), commit and pu
 
 ## Deploy
 Render picks up `render.yaml` (Node web service, free plan).
+
+## Viewer features
+- Mask: only the part of the mesh inside `public/mask.json` (the `Mask` polygon from the Drone2Map project GDB) is shown; toggle in the panel
+- Satellite: Esri World Imagery, reprojected in the browser to UTM 36N tiles (the scene is local in the mesh CRS)
+- 3D tools: distance, area, elevation profile, line of sight, slice, 3D swipe (vertical slice plane on a slider), daylight with shadows, shadow cast (hours in shade), coordinates with real heights
+- The mesh is lowered by `GROUND` (303 m) so it sits on the flat satellite ground; coordinate readouts add it back
+
+## Tests
+```
+npm test                                   # every I3S resource
+node test/browser.js http://localhost:3000/ <outDir>   # headless Edge: opens all tools, screenshots, console errors
+```

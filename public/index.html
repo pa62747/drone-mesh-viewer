@@ -6,70 +6,324 @@
   <title>מודל תלת-ממדי</title>
   <link rel="stylesheet" href="https://js.arcgis.com/4.32/esri/themes/dark/main.css">
   <style>
+    :root { --bg: rgba(28, 30, 34, .92); --fg: #e8e8e8; --muted: #a9adb8; --accent: #4fa3ff; --line: #3a3f48; }
     html, body, #viewDiv { margin: 0; padding: 0; width: 100%; height: 100%; background: #1e2024; }
-    #panel {
-      position: absolute; top: 12px; right: 12px; z-index: 10; max-width: calc(100% - 24px);
-      background: rgba(30, 32, 36, .88); color: #e8e8e8; border-radius: 8px; padding: 10px 14px;
-      font: 14px/1.4 system-ui, "Segoe UI", Arial, sans-serif; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    body { font: 14px/1.4 system-ui, "Segoe UI", Arial, sans-serif; color: var(--fg); }
+    #ui {
+      position: absolute; top: 12px; right: 12px; z-index: 10; width: 370px; max-width: calc(100% - 24px);
+      max-height: calc(100% - 24px); display: flex; flex-direction: column; gap: 8px;
     }
-    #panel h1 { font-size: 16px; margin: 0 0 4px; }
-    #status { font-size: 12px; color: #aab; }
+    .card { background: var(--bg); border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.45); padding: 10px 12px; }
+    h1 { font-size: 16px; margin: 0 0 2px; }
+    #status { font-size: 12px; color: var(--muted); }
     #status.err { color: #ff8a80; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .row label { flex: 1; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    #tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    #tools button {
+      background: #2b2f36; color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+      padding: 7px 4px; font: inherit; font-size: 12.5px; cursor: pointer; line-height: 1.2;
+    }
+    #tools button:hover { border-color: var(--accent); }
+    #tools button.active { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+    #panel { overflow-y: auto; overflow-x: hidden; padding: 0; display: none; }
+    #panel.open { display: block; }
+    #panelHead { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+    #panelHead b { font-size: 14px; }
+    #panelClose { background: none; border: 0; color: var(--muted); font-size: 18px; cursor: pointer; }
+    #panelHint { font-size: 12px; color: var(--muted); padding: 6px 12px 0; }
+    #panelBody { padding: 6px 4px 8px; }
+    #panelBody .esri-widget { background: transparent; }
+    .seg { display: flex; gap: 6px; margin: 6px 8px; }
+    .seg button { flex: 1; background: #2b2f36; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; cursor: pointer; font: inherit; }
+    .pad { padding: 4px 8px; }
+    table.coords { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.coords td { padding: 3px 8px; border-bottom: 1px solid var(--line); }
+    table.coords td:first-child { color: var(--muted); width: 45%; }
+    .ltr { direction: ltr; text-align: left; font-variant-numeric: tabular-nums; }
+    @media (max-width: 600px) { #ui { width: auto; left: 12px; } #tools { grid-template-columns: repeat(3, 1fr); } }
   </style>
 </head>
 <body>
-  <div id="panel">
-    <h1>מודל תלת-ממדי</h1>
-    <div id="status">טוען…</div>
+  <div id="ui">
+    <div class="card">
+      <h1>מודל תלת-ממדי</h1>
+      <div id="status">טוען…</div>
+    </div>
+    <div class="card" id="layersCard">
+      <div class="row"><input type="checkbox" id="chkMask" checked><label for="chkMask">הצג רק את האזור שבתוך המסכה</label></div>
+      <div class="row"><input type="checkbox" id="chkSat" checked><label for="chkSat">תצלום לוויין (Esri World Imagery)</label></div>
+      <div class="row"><label for="rngOpacity">שקיפות המודל</label></div>
+      <input type="range" id="rngOpacity" min="0" max="100" value="100">
+    </div>
+    <div class="card"><div id="tools"></div></div>
+    <div class="card" id="panel">
+      <div id="panelHead"><b id="panelTitle"></b><button id="panelClose" title="סגירה">✕</button></div>
+      <div id="panelHint"></div>
+      <div id="panelBody"></div>
+    </div>
   </div>
   <div id="viewDiv"></div>
 
   <script src="https://js.arcgis.com/4.32/"></script>
   <script>
-    require([
-      "esri/Map",
-      "esri/views/SceneView",
-      "esri/layers/IntegratedMeshLayer",
-      "esri/widgets/NavigationToggle",
-      "esri/widgets/Home"
-    ], (Map, SceneView, IntegratedMeshLayer, NavigationToggle, Home) => {
-      const status = document.getElementById("status");
-      const layer = new IntegratedMeshLayer({
-        url: new URL("Mesh/SceneServer/layers/0", location.href).href
-      });
+  require([
+    "esri/intl", "esri/Map", "esri/Basemap", "esri/views/SceneView",
+    "esri/layers/IntegratedMeshLayer", "esri/layers/BaseTileLayer", "esri/layers/support/TileInfo",
+    "esri/layers/support/SceneModification", "esri/layers/support/SceneModifications",
+    "esri/geometry/Polygon", "esri/geometry/Point", "esri/geometry/projection",
+    "esri/analysis/SliceAnalysis", "esri/analysis/SlicePlane",
+    "esri/widgets/DirectLineMeasurement3D", "esri/widgets/AreaMeasurement3D",
+    "esri/widgets/ElevationProfile", "esri/widgets/LineOfSight", "esri/widgets/Slice",
+    "esri/widgets/Daylight", "esri/widgets/ShadowCast",
+    "esri/widgets/NavigationToggle", "esri/widgets/Home", "esri/widgets/Fullscreen"
+  ], (intl, Map, Basemap, SceneView, IntegratedMeshLayer, BaseTileLayer, TileInfo,
+      SceneModification, SceneModifications, Polygon, Point, projection,
+      SliceAnalysis, SlicePlane,
+      DirectLineMeasurement3D, AreaMeasurement3D, ElevationProfile, LineOfSight, Slice,
+      Daylight, ShadowCast, NavigationToggle, Home, Fullscreen) => {
 
-      // Mesh is in a projected CRS (UTM), which requires a local scene in that CRS.
-      // Web basemaps are Web Mercator, so the scene shows the mesh without a basemap.
-      const map = new Map({ layers: [layer] });
-      map.ground.opacity = 0;
+    intl.setLocale("he");
+
+    // Ground height (m, EGM96) inside the mask area, from the Drone2Map solution points (2nd percentile).
+    // The scene is local in UTM 36N, where web elevation services are not available, so the satellite image
+    // lies on a flat ground at 0 m and the mesh is lowered by this offset to sit on it.
+    // Coordinate readouts add the offset back to show real heights.
+    const GROUND = 303;
+    const SAT_URL = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer";
+
+    const $ = (id) => document.getElementById(id);
+    const status = $("status");
+    const setStatus = (t, err) => { status.textContent = t; status.className = err ? "err" : ""; };
+    window.addEventListener("error", (e) => setStatus("שגיאה: " + e.message, true));
+
+    const mesh = new IntegratedMeshLayer({
+      url: new URL("Mesh/SceneServer/layers/0", location.href).href,
+      elevationInfo: { mode: "absolute-height", offset: -GROUND }
+    });
+    Promise.all([mesh.load(), fetch("mask.json").then((r) => r.json()), projection.load()])
+      .then(([, maskJson]) => start(maskJson))
+      .catch((e) => setStatus("שגיאה בטעינה: " + e.message, true));
+
+    // Satellite imagery for a local scene in UTM 36N. Esri World Imagery is cached in Web Mercator, and its
+    // export endpoint only reprojects down to ~0.6 m/px, so each 256 px UTM tile is built in the browser:
+    // the covering Web Mercator tiles (~0.25 m/px at zoom 19) are mosaicked and warped with an affine
+    // transform from the tile's projected corners (exact enough over < 100 m).
+    function createSatellite(sr, extent) {
+      const ORIGIN = { x: Math.floor(extent.xmin / 1000) * 1000 - 1000, y: Math.ceil(extent.ymax / 1000) * 1000 + 1000 };
+      const lods = [5.12, 2.56, 1.28, 0.64, 0.32, 0.16, 0.08].map((resolution, level) =>
+        ({ level, resolution, scale: resolution * 96 / 0.0254 }));
+      const tileInfo = new TileInfo({ size: [256, 256], dpi: 96, format: "jpg", lods,
+        origin: { x: ORIGIN.x, y: ORIGIN.y, spatialReference: sr }, spatialReference: sr });
+      const WM = 20037508.342789244, MAX_Z = 18; // zoom 19+ has no imagery at this site ("Map data not yet available")
+      const toWM = (x, y) => projection.project(new Point({ x, y, spatialReference: sr }), { wkid: 3857 });
+      const loadImg = (url, signal) => fetch(url, { signal, mode: "cors" })
+        .then((r) => (r.ok ? r.blob() : Promise.reject(r.status))).then(createImageBitmap).catch(() => null);
+
+      const Sat = BaseTileLayer.createSubclass({
+        async fetchTile(level, row, col, options = {}) {
+          const res = this.tileInfo.lods[level].resolution, S = 256 * res;
+          const x0 = ORIGIN.x + col * S, y1 = ORIGIN.y - row * S;
+          const pTL = toWM(x0, y1), pTR = toWM(x0 + S, y1), pBL = toWM(x0, y1 - S), pBR = toWM(x0 + S, y1 - S);
+          const lat = projection.project(pTL, { wkid: 4326 }).y * Math.PI / 180;
+          const z = Math.max(0, Math.min(MAX_Z, Math.ceil(Math.log2(2 * WM * Math.cos(lat) / 256 / res))));
+          const span = 2 * WM / 2 ** z, wmRes = span / 256;
+          const xs = [pTL.x, pTR.x, pBL.x, pBR.x], ys = [pTL.y, pTR.y, pBL.y, pBR.y];
+          const c0 = Math.floor((Math.min(...xs) + WM) / span), c1 = Math.floor((Math.max(...xs) + WM) / span);
+          const r0 = Math.floor((WM - Math.max(...ys)) / span), r1 = Math.floor((WM - Math.min(...ys)) / span);
+
+          const mosaic = document.createElement("canvas");
+          mosaic.width = (c1 - c0 + 1) * 256; mosaic.height = (r1 - r0 + 1) * 256;
+          const mctx = mosaic.getContext("2d");
+          const jobs = [];
+          for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+            jobs.push(loadImg(`${SAT_URL}/tile/${z}/${r}/${c}`, options.signal).then((img) => {
+              if (img) mctx.drawImage(img, (c - c0) * 256, (r - r0) * 256);
+            }));
+          }
+          await Promise.all(jobs);
+
+          // mosaic pixel of a Web Mercator point
+          const X0 = c0 * span - WM, Y0 = WM - r0 * span;
+          const px = (p) => [(p.x - X0) / wmRes, (Y0 - p.y) / wmRes];
+          const [p0x, p0y] = px(pTL), [p1x, p1y] = px(pTR), [p2x, p2y] = px(pBL);
+          const dux = (p1x - p0x) / 256, duy = (p1y - p0y) / 256, dvx = (p2x - p0x) / 256, dvy = (p2y - p0y) / 256;
+          const det = dux * dvy - dvx * duy;
+          const a = dvy / det, c = -dvx / det, b = -duy / det, d = dux / det;
+          const out = document.createElement("canvas");
+          out.width = out.height = 256;
+          const ctx = out.getContext("2d");
+          ctx.imageSmoothingQuality = "high";
+          ctx.setTransform(a, b, c, d, -(a * p0x + c * p0y), -(b * p0x + d * p0y));
+          ctx.drawImage(mosaic, 0, 0);
+          return out;
+        }
+      });
+      return new Sat({ title: "Esri World Imagery", tileInfo, spatialReference: sr, fullExtent: extent,
+        copyright: "Esri, Maxar, Earthstar Geographics, and the GIS User Community" });
+    }
+
+    function start(maskJson) {
+      const sr = mesh.spatialReference;
+      const satellite = createSatellite(sr, mesh.fullExtent.clone().expand(1.6));
+      const maskPolygon = Polygon.fromJSON(maskJson);
+      const maskMods = new SceneModifications([new SceneModification({ geometry: maskPolygon, type: "mask" })]);
+      mesh.modifications = maskMods;
+
+      const map = new Map({ basemap: new Basemap({ baseLayers: [satellite], title: "Satellite" }), layers: [mesh] });
       map.ground.navigationConstraint = { type: "none" };
 
-      layer.load().then(() => {
-        const view = new SceneView({
-          container: "viewDiv",
-          map,
-          viewingMode: "local",
-          spatialReference: layer.spatialReference,
-          environment: {
-            background: { type: "color", color: [30, 32, 36, 1] },
-            starsEnabled: false,
-            atmosphereEnabled: false,
-            lighting: { type: "virtual" }
-          },
-          qualityProfile: "high"
-        });
-        view.ui.add(new NavigationToggle({ view }), "top-left");
-        view.when(() => view.goTo({ target: layer.fullExtent, tilt: 55 }, { animate: false }))
-          .then(() => {
-            view.ui.add(new Home({ view }), "top-left");
-            status.textContent = "גרירה: סיבוב · גלגלת: זום · מקש ימני: הזזה";
-          })
-          .catch((e) => { status.textContent = "שגיאה בהצגה: " + e.message; status.className = "err"; });
-      }).catch((e) => {
-        status.textContent = "שגיאה בטעינת השכבה: " + e.message;
-        status.className = "err";
+      const meshExtent = mesh.fullExtent;
+      const view = new SceneView({
+        container: "viewDiv", map, viewingMode: "local", spatialReference: sr,
+        clippingArea: meshExtent.clone().expand(1.6),
+        qualityProfile: "high",
+        environment: {
+          background: { type: "color", color: [30, 32, 36, 1] },
+          starsEnabled: false, atmosphereEnabled: false,
+          // start at 11:00 today so the model is lit even when opened at night
+          lighting: { type: "sun", date: new Date(new Date().setHours(11, 0, 0, 0)), directShadowsEnabled: true }
+        }
       });
-    });
+      window.view = view;
+
+      view.ui.add(new Fullscreen({ view }), "top-left");
+
+      const maskCamera = { target: maskPolygon.extent.clone().expand(1.4), tilt: 60 };
+      view.when(() => view.goTo(maskCamera, { animate: false })).then(() => {
+        view.ui.add(new Home({ view }), "top-left");
+        setStatus("גרירה: סיבוב · גלגלת: זום · מקש ימני: הזזה");
+      }).catch((e) => setStatus("שגיאה בהצגה: " + e.message, true));
+
+      // ---- layer controls ----
+      $("chkMask").onchange = (e) => {
+        mesh.modifications = e.target.checked ? maskMods : null;
+        view.goTo(e.target.checked ? maskCamera : { target: meshExtent, tilt: 55 });
+      };
+      $("chkSat").onchange = (e) => { satellite.visible = e.target.checked; };
+      $("rngOpacity").oninput = (e) => { mesh.opacity = e.target.value / 100; };
+
+      // ---- tools ----
+      const body = $("panelBody");
+      let active = null; // { id, cleanup }
+
+      const tools = [
+        { id: "dist", label: "מדידת מרחק", hint: "לחיצה על שתי נקודות במודל. מוצגים מרחק ישיר, אופקי ואנכי.",
+          run: (el) => widget(new DirectLineMeasurement3D({ view, container: el, unit: "metric" })) },
+        { id: "area", label: "מדידת שטח", hint: "לחיצות לסימון פוליגון על המודל, לחיצה כפולה לסיום. מוצגים שטח והיקף.",
+          run: (el) => widget(new AreaMeasurement3D({ view, container: el, unit: "metric" })) },
+        { id: "profile", label: "פרופיל גובה", hint: "שרטוט קו על המודל. הגבהים בגרף יחסיים לקרקע (0 = 303 מ' מעל פני הים).",
+          run: (el) => widget(new ElevationProfile({ view, container: el, unit: "metric",
+            profiles: [{ type: "view", title: "מודל", color: "#4fa3ff" }],
+            visibleElements: { legend: true, settingsButton: false } })) },
+        { id: "los", label: "קו ראייה", hint: "לחיצה ראשונה: נקודת התצפית. לחיצות נוספות: מטרות. ירוק = נראה, אדום = מוסתר.",
+          run: (el) => widget(new LineOfSight({ view, container: el })) },
+        { id: "slice", label: "חיתוך", hint: "לחיצה על משטח במודל יוצרת מישור חיתוך (קיר או רצפה) שאפשר להזיז ולסובב.",
+          run: (el) => widget(new Slice({ view, container: el, excludeGroundSurface: true })) },
+        { id: "swipe", label: "סוויפ", hint: "הזזת הסרגל חושפת את תצלום הלוויין שמתחת למודל.", run: swipeTool },
+        { id: "sun", label: "שמש וצל", hint: "בחירת תאריך ושעה. הצללים מחושבים לפי מיקום השמש האמיתי באתר.",
+          run: (el) => widget(new Daylight({ view, container: el, dateOrSeason: "date",
+            visibleElements: { timezone: true, playButtons: true, shadowsToggle: true, sunLightingToggle: false } })) },
+        { id: "shadow", label: "הצללה מצטברת", hint: "כמה שעות כל אזור נמצא בצל ביום שנבחר, בטווח השעות שנבחר.",
+          run: (el) => widget(new ShadowCast({ view, container: el })) },
+        { id: "coords", label: "קואורדינטות", hint: "לחיצה על נקודה במודל מציגה את מיקומה ואת הגובה האמיתי שלה.", run: coordsTool }
+      ];
+
+      const toolsEl = $("tools");
+      for (const t of tools) {
+        const b = document.createElement("button");
+        b.textContent = t.label; b.dataset.id = t.id;
+        b.onclick = () => (active && active.id === t.id ? closeTool() : openTool(t));
+        toolsEl.appendChild(b);
+      }
+      $("panelClose").onclick = closeTool;
+
+      function openTool(t) {
+        closeTool();
+        $("panelTitle").textContent = t.label;
+        $("panelHint").textContent = t.hint;
+        $("panel").classList.add("open");
+        toolsEl.querySelector(`[data-id="${t.id}"]`).classList.add("active");
+        const el = document.createElement("div");
+        body.appendChild(el);
+        active = { id: t.id, cleanup: t.run(el) || (() => {}) };
+      }
+      function closeTool() {
+        if (!active) return;
+        try { active.cleanup(); } catch (e) { console.warn(e); }
+        body.innerHTML = "";
+        toolsEl.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+        $("panel").classList.remove("open");
+        active = null;
+      }
+      function widget(w) {
+        if (w.viewModel && typeof w.viewModel.start === "function" && w.declaredClass !== "esri.widgets.ElevationProfile") {
+          view.when(() => w.viewModel.start && w.viewModel.start()).catch(() => {});
+        }
+        return () => w.destroy();
+      }
+
+      // ---- 3D swipe: a vertical slice plane moved by a slider; the ground (satellite) is never cut ----
+      function swipeTool(el) {
+        const ext = (mesh.modifications ? maskPolygon.extent : meshExtent).clone().expand(1.05);
+        let axis = "ew", flip = false, t = 0.5;
+        const analysis = new SliceAnalysis({ excludeGroundSurface: true, tiltEnabled: false });
+        view.analyses.add(analysis);
+
+        el.innerHTML = `
+          <div class="pad"><input type="range" id="swipeRange" min="0" max="1000" value="500"></div>
+          <div class="seg">
+            <button id="swipeAxis">כיוון: מזרח ↔ מערב</button>
+            <button id="swipeFlip">החלפת צד</button>
+          </div>`;
+        const update = () => {
+          const ew = axis === "ew"; // plane runs north-south, moves east-west
+          const x = ew ? ext.xmin + t * (ext.xmax - ext.xmin) : (ext.xmin + ext.xmax) / 2;
+          const y = ew ? (ext.ymin + ext.ymax) / 2 : ext.ymin + t * (ext.ymax - ext.ymin);
+          analysis.shape = new SlicePlane({
+            position: new Point({ x, y, z: 15, spatialReference: sr }),
+            heading: (ew ? 270 : 0) + (flip ? 180 : 0),
+            tilt: 90, // vertical plane
+            width: 2000, height: 400
+          });
+        };
+        el.querySelector("#swipeRange").oninput = (e) => { t = e.target.value / 1000; update(); };
+        el.querySelector("#swipeAxis").onclick = (e) => {
+          axis = axis === "ew" ? "ns" : "ew";
+          e.target.textContent = axis === "ew" ? "כיוון: מזרח ↔ מערב" : "כיוון: צפון ↔ דרום";
+          update();
+        };
+        el.querySelector("#swipeFlip").onclick = () => { flip = !flip; update(); };
+        update();
+        return () => view.analyses.remove(analysis);
+      }
+
+      // ---- coordinate picker with real heights ----
+      function coordsTool(el) {
+        el.innerHTML = `<table class="coords"><tbody id="coordRows">
+          <tr><td>—</td><td>לחצו על נקודה במודל</td></tr></tbody></table>`;
+        const rows = el.querySelector("#coordRows");
+        const handle = view.on("click", async (event) => {
+          event.stopPropagation();
+          const hit = await view.hitTest(event, { include: [mesh] });
+          const r = hit.results.find((x) => x.mapPoint);
+          const p = r ? r.mapPoint : view.toMap(event);
+          if (!p) return;
+          const geo = projection.project(p, { wkid: 4326 });
+          const fmt = (v, d) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+          rows.innerHTML = `
+            <tr><td>מזרח (E), UTM 36N</td><td class="ltr">${fmt(p.x, 2)}</td></tr>
+            <tr><td>צפון (N), UTM 36N</td><td class="ltr">${fmt(p.y, 2)}</td></tr>
+            <tr><td>גובה (מ', EGM96)</td><td class="ltr">${r ? fmt(p.z + GROUND, 2) : "—"}</td></tr>
+            <tr><td>קו רוחב</td><td class="ltr">${fmt(geo.y, 7)}°</td></tr>
+            <tr><td>קו אורך</td><td class="ltr">${fmt(geo.x, 7)}°</td></tr>
+            <tr><td>פגיעה</td><td>${r ? "במודל" : "בקרקע (גובה לא זמין)"}</td></tr>`;
+        });
+        return () => handle.remove();
+      }
+    }
+  });
   </script>
 </body>
 </html>

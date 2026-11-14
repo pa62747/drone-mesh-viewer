@@ -61,8 +61,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log("mask on:", await evaluate("!!window.view.map.layers.getItemAt(0).modifications"));
   await shot("01-initial");
 
+  // elevation models: sampled ground heights and a low oblique view of the mask edge in each mode
+  if (!process.env.ONLY_WALK && await evaluate("!!document.getElementById('selGround')")) {
+    const pts = { maskCenter: [688955, 3512108], maskSW: [688925, 3512080], meshNW: [688800, 3512280], outsideE: [689150, 3512100] };
+    await evaluate("window.__cam0 = window.view.camera.clone(), true");
+    const lowCam = "window.view.goTo({ position: { x: 688905, y: 3512045, z: 330, spatialReference: window.view.spatialReference }, heading: 40, tilt: 72 }, { animate: false })";
+    for (const mode of ["blend", "dem"]) {
+      await evaluate(`(() => { const s = document.getElementById('selGround'); s.value = '${mode}'; s.dispatchEvent(new Event('change')); })()`);
+      await evaluate(lowCam); await waitIdle(60000);
+      const z = await evaluate(`(() => { const P = ${JSON.stringify(pts)};
+        return Object.fromEntries(Object.entries(P).map(([k, [x, y]]) => [k, +window.viewerDebug.terrain(x, y).toFixed(2)])); })()`);
+      console.log(`terrain ${mode}:`, JSON.stringify(z));
+      await shot(`05-ground-${mode}`);
+    }
+    await evaluate("(() => { const s = document.getElementById('selGround'); s.value = 'blend'; s.dispatchEvent(new Event('change')); })()");
+    await evaluate("window.view.goTo(window.__cam0, { animate: false })");
+    await waitIdle(30000);
+  }
+
   const ids = await evaluate("[...document.querySelectorAll('#tools button')].map(b => b.dataset.id)");
-  for (const t of ids) {
+  for (const t of (process.env.ONLY_WALK ? [] : ids)) {
     const before = errors.length;
     await evaluate(`document.querySelector('#tools button[data-id="${t}"]').click()`);
     await sleep(2500);
@@ -80,8 +98,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (ids.includes("walk")) {
     await evaluate(`document.querySelector('#tools button[data-id="walk"]').click()`);
     await sleep(1500);
-    const mouse = (type) => send("Input.dispatchMouseEvent", { type, x: 520, y: 520, button: "left", clickCount: 1 });
-    await mouse("mousePressed"); await mouse("mouseReleased");
+    const mouse = (type) => send("Input.dispatchMouseEvent", { type, x: 520, y: 520, button: type === "mouseMoved" ? "none" : "left", clickCount: 1 });
+    await evaluate("window.__clicks = 0; window.view.on('click', (e) => { window.__clicks++; window.__lastClick = [e.x, e.y]; }); true");
+    await mouse("mouseMoved"); await sleep(200);
+    await mouse("mousePressed"); await sleep(80); await mouse("mouseReleased");
     for (let i = 0; i < 40; i++) {
       await sleep(250);
       if ((await evaluate("document.getElementById('walkMsg').textContent")).startsWith("גובה קרקע")) break;
@@ -89,7 +109,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await sleep(500);
     const cam = "(() => { const c = window.view.camera; return { x: +c.position.x.toFixed(2), y: +c.position.y.toFixed(2), z: +c.position.z.toFixed(2), tilt: +c.tilt.toFixed(1), heading: +c.heading.toFixed(1) }; })()";
     const c1 = await evaluate(cam);
-    console.log("walk start camera:", JSON.stringify(c1), "msg:", await evaluate("document.getElementById('walkMsg').textContent"));
+    console.log("walk start camera:", JSON.stringify(c1), "msg:", await evaluate("document.getElementById('walkMsg').textContent"),
+      "| status:", await evaluate("document.getElementById('status').textContent"), "| clicks:", await evaluate("JSON.stringify([window.__clicks, window.__lastClick])"), "| toMap:", await evaluate("JSON.stringify(window.view.toMap({x:520,y:520}))"));
     const key = (type) => send("Input.dispatchKeyEvent", { type, key: "w", code: "KeyW", windowsVirtualKeyCode: 87 });
     await key("keyDown"); await sleep(1500); await key("keyUp");
     await sleep(800);

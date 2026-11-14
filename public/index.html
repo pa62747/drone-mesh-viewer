@@ -20,6 +20,7 @@
     .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
     .row label { flex: 1; }
     input[type=range] { width: 100%; accent-color: var(--accent); }
+    select { background: #2b2f36; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit; }
     #tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
     #tools button {
       background: #2b2f36; color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
@@ -54,6 +55,11 @@
     <div class="card" id="layersCard">
       <div class="row"><input type="checkbox" id="chkMask" checked><label for="chkMask">הצג רק את האזור שבתוך המסכה</label></div>
       <div class="row"><input type="checkbox" id="chkSat" checked><label for="chkSat">תצלום לוויין (Esri World Imagery)</label></div>
+      <div class="row"><label for="selGround">מודל גבהים</label>
+        <select id="selGround">
+          <option value="blend" selected>DEM עולמי + קרקע מהרחפן</option>
+          <option value="dem">DEM עולמי בלבד</option>
+        </select></div>
       <div class="row"><label for="rngOpacity">שקיפות המודל</label></div>
       <input type="range" id="rngOpacity" min="0" max="100" value="100">
     </div>
@@ -69,8 +75,8 @@
   <script src="https://js.arcgis.com/4.32/"></script>
   <script>
   require([
-    "esri/intl", "esri/Map", "esri/Basemap", "esri/Camera", "esri/views/SceneView",
-    "esri/layers/IntegratedMeshLayer", "esri/layers/BaseTileLayer", "esri/layers/support/TileInfo",
+    "esri/intl", "esri/Map", "esri/Basemap", "esri/Ground", "esri/Camera", "esri/views/SceneView",
+    "esri/layers/IntegratedMeshLayer", "esri/layers/BaseTileLayer", "esri/layers/BaseElevationLayer", "esri/layers/support/TileInfo",
     "esri/layers/support/SceneModification", "esri/layers/support/SceneModifications",
     "esri/geometry/Polygon", "esri/geometry/Point", "esri/geometry/projection",
     "esri/analysis/SliceAnalysis", "esri/analysis/SlicePlane",
@@ -78,7 +84,7 @@
     "esri/widgets/ElevationProfile", "esri/widgets/LineOfSight", "esri/widgets/Slice",
     "esri/widgets/Daylight", "esri/widgets/ShadowCast",
     "esri/widgets/NavigationToggle", "esri/widgets/Home", "esri/widgets/Fullscreen"
-  ], (intl, Map, Basemap, Camera, SceneView, IntegratedMeshLayer, BaseTileLayer, TileInfo,
+  ], (intl, Map, Basemap, Ground, Camera, SceneView, IntegratedMeshLayer, BaseTileLayer, BaseElevationLayer, TileInfo,
       SceneModification, SceneModifications, Polygon, Point, projection,
       SliceAnalysis, SlicePlane,
       DirectLineMeasurement3D, AreaMeasurement3D, ElevationProfile, LineOfSight, Slice,
@@ -86,38 +92,154 @@
 
     intl.setLocale("he");
 
-    // Ground height (m, EGM96) inside the mask area, from the Drone2Map solution points (2nd percentile).
-    // The scene is local in UTM 36N, where web elevation services are not available, so the satellite image
-    // lies on a flat ground at 0 m and the mesh is lowered by this offset to sit on it.
-    // Coordinate readouts add the offset back to show real heights.
-    const GROUND = 303;
+    // The scene is local in UTM 36N (the mesh CRS). Web services in Web Mercator cannot be used directly there,
+    // so the satellite imagery and the global elevation model are both re-tiled into UTM in the browser.
+    // Heights are orthometric (EGM96) everywhere: mesh, global DEM and drone ground.
     const SAT_URL = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer";
+    // AWS Terrain Tiles (Mapzen/Tilezen, open data): global, free, no key. Terrarium PNG, metres above sea level.
+    const DEM_URL = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+    const DEM_Z = 15; // ~4 m/px here; source data is ~30 m (SRTM), deeper zooms add nothing
+    const WM = 20037508.342789244;
 
     const $ = (id) => document.getElementById(id);
     const status = $("status");
     const setStatus = (t, err) => { status.textContent = t; status.className = err ? "err" : ""; };
     window.addEventListener("error", (e) => setStatus("שגיאה: " + e.message, true));
-
-    const mesh = new IntegratedMeshLayer({
-      url: new URL("Mesh/SceneServer/layers/0", location.href).href,
-      elevationInfo: { mode: "absolute-height", offset: -GROUND }
+    window.addEventListener("unhandledrejection", (e) => {
+      if (e.reason && e.reason.name === "AbortError") return;
+      console.error(e.reason); setStatus("שגיאה: " + ((e.reason && e.reason.message) || e.reason), true);
     });
-    Promise.all([mesh.load(), fetch("mask.json").then((r) => r.json()), projection.load()])
+
+    const mesh = new IntegratedMeshLayer({ url: new URL("Mesh/SceneServer/layers/0", location.href).href });
+
+    // Bare-earth heights from the Drone2Map solution points (1 m grid, see README). Used to refine the
+    // global DEM where the mesh is, and by walk mode as a fallback.
+    let groundGrid = null;
+    const loadGround = async () => {
+      if (groundGrid) return groundGrid;
+      const g = await (await fetch("ground.json")).json();
+      g.values = new Int16Array(Uint8Array.from(atob(g.data), (ch) => ch.charCodeAt(0)).buffer);
+      return (groundGrid = g);
+    };
+    const groundAt = (x, y) => { // bilinear, real height (m, EGM96)
+      const g = groundGrid;
+      const c = Math.min(Math.max((x - g.x0) / g.cell, 0), g.cols - 1.001);
+      const r = Math.min(Math.max((g.y1 - y) / g.cell, 0), g.rows - 1.001);
+      const c0 = Math.floor(c), r0 = Math.floor(r), fc = c - c0, fr = r - r0, v = (rr, cc) => g.values[rr * g.cols + cc];
+      const top = v(r0, c0) * (1 - fc) + v(r0, c0 + 1) * fc, bot = v(r0 + 1, c0) * (1 - fc) + v(r0 + 1, c0 + 1) * fc;
+      return g.base + (top * (1 - fr) + bot * fr) / 100;
+    };
+    // Weight of the drone ground. "full": 1 inside the grid, fading to 0 over 30 m near its (less reliable)
+    // edges. "mask": additionally limited to the mask area (+10 m, fading over 25 m). With the mask on, the
+    // terrain around it is visible, and the bare-earth filter leaves bumps under large building blocks there.
+    let maskBox = null; // set in start()
+    const droneWeight = (x, y, scope) => {
+      const g = groundGrid;
+      const d = Math.min(x - g.x0, g.x0 + g.cols * g.cell - x, g.y1 - y, y - (g.y1 - g.rows * g.cell));
+      let w = Math.min(1, Math.max(0, (d - 15) / 30));
+      if (scope === "mask" && maskBox) {
+        const dx = Math.max(maskBox.xmin - x, 0, x - maskBox.xmax), dy = Math.max(maskBox.ymin - y, 0, y - maskBox.ymax);
+        w = Math.min(w, Math.min(1, Math.max(0, 1 - (Math.hypot(dx, dy) - 10) / 25)));
+      }
+      return w;
+    };
+
+    Promise.all([mesh.load(), fetch("mask.json").then((r) => r.json()), projection.load(), loadGround()])
       .then(([, maskJson]) => start(maskJson))
       .catch((e) => setStatus("שגיאה בטעינה: " + e.message, true));
 
-    // Satellite imagery for a local scene in UTM 36N. Esri World Imagery is cached in Web Mercator, and its
-    // export endpoint only reprojects down to ~0.6 m/px, so each 256 px UTM tile is built in the browser:
-    // the covering Web Mercator tiles (~0.25 m/px at zoom 19) are mosaicked and warped with an affine
-    // transform from the tile's projected corners (exact enough over < 100 m).
-    function createSatellite(sr, extent) {
+    // Shared UTM tiling scheme: basemap and elevation must use compatible tiling schemes.
+    function utmTiling(sr, extent) {
       const ORIGIN = { x: Math.floor(extent.xmin / 1000) * 1000 - 1000, y: Math.ceil(extent.ymax / 1000) * 1000 + 1000 };
       const lods = [5.12, 2.56, 1.28, 0.64, 0.32, 0.16, 0.08].map((resolution, level) =>
         ({ level, resolution, scale: resolution * 96 / 0.0254 }));
       const tileInfo = new TileInfo({ size: [256, 256], dpi: 96, format: "jpg", lods,
         origin: { x: ORIGIN.x, y: ORIGIN.y, spatialReference: sr }, spatialReference: sr });
-      const WM = 20037508.342789244, MAX_Z = 18; // zoom 19+ has no imagery at this site ("Map data not yet available")
       const toWM = (x, y) => projection.project(new Point({ x, y, spatialReference: sr }), { wkid: 3857 });
+      return { ORIGIN, tileInfo, toWM };
+    }
+
+    // Global elevation model re-tiled into UTM: each 257x257 elevation tile samples the covering Terrarium
+    // tiles (bilinear) through an affine map from the tile corners. Optionally blends in the drone ground.
+    const DEM_SPAN = 2 * WM / 2 ** DEM_Z;
+    const demCache = new globalThis.Map(); // "Map" is the esri/Map module in this scope
+    const demReady = new globalThis.Map();
+    function demTile(x, y) {
+      const key = x + "/" + y;
+      if (!demCache.has(key)) {
+        demCache.set(key, fetch(DEM_URL(DEM_Z, x, y), { mode: "cors" })
+          .then((r) => (r.ok ? r.blob() : Promise.reject(r.status))).then(createImageBitmap).then((img) => {
+            const cv = document.createElement("canvas"); cv.width = cv.height = 256;
+            const ctx = cv.getContext("2d", { willReadFrequently: true }); ctx.drawImage(img, 0, 0);
+            const px = ctx.getImageData(0, 0, 256, 256).data, h = new Float32Array(256 * 256);
+            for (let i = 0; i < h.length; i++) h[i] = px[i * 4] * 256 + px[i * 4 + 1] + px[i * 4 + 2] / 256 - 32768;
+            demReady.set(key, h);
+            return h;
+          }).catch(() => null));
+      }
+      return demCache.get(key);
+    }
+    // DEM height at a Web Mercator point from already loaded tiles (bilinear); NaN if the tile is not loaded
+    function demAtWM(X, Y) {
+      const fx = (X + WM) / DEM_SPAN, fy = (WM - Y) / DEM_SPAN, tx = Math.floor(fx), ty = Math.floor(fy);
+      const h = demReady.get(tx + "/" + ty); if (!h) return NaN;
+      const px = Math.min(Math.max((fx - tx) * 256 - 0.5, 0), 254.999), py = Math.min(Math.max((fy - ty) * 256 - 0.5, 0), 254.999);
+      const ix = Math.floor(px), iy = Math.floor(py), dx = px - ix, dy = py - iy, i = iy * 256 + ix;
+      return h[i] * (1 - dx) * (1 - dy) + h[i + 1] * dx * (1 - dy) + h[i + 256] * (1 - dx) * dy + h[i + 257] * dx * dy;
+    }
+    // Displayed terrain: global DEM, refined by the drone ground near the mesh. Drone ground more than 3 m above
+    // the DEM is treated as a building the bare-earth filter missed, and capped.
+    const DRONE_MAX_ABOVE_DEM = 3;
+    function terrainHeight(dem, x, y, scope) { // scope: null (DEM only) | "full" | "mask"
+      if (!scope) return dem;
+      const w = droneWeight(x, y, scope);
+      if (w <= 0) return dem;
+      if (isNaN(dem)) return groundAt(x, y);
+      const d = Math.min(groundAt(x, y), dem + DRONE_MAX_ABOVE_DEM);
+      return dem * (1 - w) + d * w;
+    }
+    function createElevation(sr, extent, scope) {
+      const { ORIGIN, tileInfo, toWM } = utmTiling(sr, extent);
+      const span = DEM_SPAN, N = 257;
+      const Elev = BaseElevationLayer.createSubclass({
+        async fetchTile(level, row, col) {
+          const res = tileInfo.lods[level].resolution, S = 256 * res;
+          const x0 = ORIGIN.x + col * S, y1 = ORIGIN.y - row * S;
+          const pTL = toWM(x0, y1), pTR = toWM(x0 + S, y1), pBL = toWM(x0, y1 - S), pBR = toWM(x0 + S, y1 - S);
+          const xs = [pTL.x, pTR.x, pBL.x, pBR.x], ys = [pTL.y, pTR.y, pBL.y, pBR.y];
+          const c0 = Math.floor((Math.min(...xs) + WM) / span), c1 = Math.floor((Math.max(...xs) + WM) / span);
+          const r0 = Math.floor((WM - Math.max(...ys)) / span), r1 = Math.floor((WM - Math.min(...ys)) / span);
+          const jobs = [];
+          for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) jobs.push(demTile(c, r));
+          await Promise.all(jobs);
+          const values = new Float32Array(N * N);
+          const ax = (pTR.x - pTL.x) / 256, ay = (pTR.y - pTL.y) / 256, bx = (pBL.x - pTL.x) / 256, by = (pBL.y - pTL.y) / 256;
+          let minValue = Infinity, maxValue = -Infinity, hasNoDataValues = false;
+          for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+            const dem = demAtWM(pTL.x + i * ax + j * bx, pTL.y + i * ay + j * by);
+            const h = terrainHeight(dem, x0 + i * res, y1 - j * res, scope);
+            if (isNaN(h)) { values[j * N + i] = -32768; hasNoDataValues = true; continue; }
+            values[j * N + i] = h;
+            if (h < minValue) minValue = h;
+            if (h > maxValue) maxValue = h;
+          }
+          if (minValue === Infinity) minValue = maxValue = 0;
+          // minValue/maxValue are required: the terrain uses them for tile bounds, and without them
+          // hit tests / toMap / measurement tools cannot intersect the ground (ElevationTileData provides them).
+          return { values, width: N, height: N, noDataValue: -32768, maxZError: 0.05, minValue, maxValue, hasNoDataValues };
+        }
+      });
+      return new Elev({ tileInfo, spatialReference: sr, fullExtent: extent,
+        title: scope ? "DEM עולמי + קרקע מהרחפן" : "DEM עולמי (AWS Terrain Tiles)" });
+    }
+
+    // Satellite imagery for a local scene in UTM 36N. Esri World Imagery is cached in Web Mercator, and its
+    // export endpoint only reprojects down to ~0.6 m/px, so each 256 px UTM tile is built in the browser:
+    // the covering Web Mercator tiles (~0.5 m/px at zoom 18) are mosaicked and warped with an affine
+    // transform from the tile's projected corners (exact enough over < 100 m).
+    function createSatellite(sr, extent) {
+      const { ORIGIN, tileInfo, toWM } = utmTiling(sr, extent);
+      const MAX_Z = 18; // zoom 19+ has no imagery at this site ("Map data not yet available")
       const loadImg = (url, signal) => fetch(url, { signal, mode: "cors" })
         .then((r) => (r.ok ? r.blob() : Promise.reject(r.status))).then(createImageBitmap).catch(() => null);
 
@@ -166,13 +288,20 @@
 
     function start(maskJson) {
       const sr = mesh.spatialReference;
-      const satellite = createSatellite(sr, mesh.fullExtent.clone().expand(1.6));
+      const sceneExtent = mesh.fullExtent.clone().expand(1.6);
+      const satellite = createSatellite(sr, sceneExtent);
       const maskPolygon = Polygon.fromJSON(maskJson);
       const maskMods = new SceneModifications([new SceneModification({ geometry: maskPolygon, type: "mask" })]);
       mesh.modifications = maskMods;
 
-      const map = new Map({ basemap: new Basemap({ baseLayers: [satellite], title: "Satellite" }), layers: [mesh] });
-      map.ground.navigationConstraint = { type: "none" };
+      maskBox = maskPolygon.extent;
+      const elevations = { mask: createElevation(sr, sceneExtent, "mask"), full: createElevation(sr, sceneExtent, "full"),
+        dem: createElevation(sr, sceneExtent, null) };
+      const map = new Map({
+        basemap: new Basemap({ baseLayers: [satellite], title: "Satellite" }),
+        ground: new Ground({ layers: [elevations.mask], navigationConstraint: { type: "none" } }),
+        layers: [mesh]
+      });
 
       const meshExtent = mesh.fullExtent;
       const view = new SceneView({
@@ -187,6 +316,7 @@
         }
       });
       window.view = view;
+      window.viewerDebug = { terrain: (x, y) => surfaceAt(x, y) }; // used by test/browser.js
 
       view.ui.add(new Fullscreen({ view }), "top-left");
 
@@ -199,9 +329,15 @@
       // ---- layer controls ----
       $("chkMask").onchange = (e) => {
         mesh.modifications = e.target.checked ? maskMods : null;
+        updateGround();
         view.goTo(e.target.checked ? maskCamera : { target: meshExtent, tilt: 55 });
       };
       $("chkSat").onchange = (e) => { satellite.visible = e.target.checked; };
+      let groundMode = "blend";
+      // current terrain scope: DEM only, or DEM + drone ground (limited to the mask area while the mask is on)
+      const terrainScope = () => (groundMode === "dem" ? null : mesh.modifications ? "mask" : "full");
+      const updateGround = () => { const s = terrainScope(); map.ground.layers = [elevations[s || "dem"]]; };
+      $("selGround").onchange = (e) => { groundMode = e.target.value; updateGround(); };
       $("rngOpacity").oninput = (e) => { mesh.opacity = e.target.value / 100; };
 
       // ---- tools ----
@@ -213,9 +349,9 @@
           run: (el) => widget(new DirectLineMeasurement3D({ view, container: el, unit: "metric" })) },
         { id: "area", label: "מדידת שטח", hint: "לחיצות לסימון פוליגון על המודל, לחיצה כפולה לסיום. מוצגים שטח והיקף.",
           run: (el) => widget(new AreaMeasurement3D({ view, container: el, unit: "metric" })) },
-        { id: "profile", label: "פרופיל גובה", hint: "שרטוט קו על המודל. הגבהים בגרף יחסיים לקרקע (0 = 303 מ' מעל פני הים).",
+        { id: "profile", label: "פרופיל גובה", hint: "שרטוט קו על המודל. גבהים אמיתיים (מ' מעל פני הים). כחול: המודל, כתום: מודל הגבהים של הקרקע.",
           run: (el) => widget(new ElevationProfile({ view, container: el, unit: "metric",
-            profiles: [{ type: "view", title: "מודל", color: "#4fa3ff" }],
+            profiles: [{ type: "view", title: "מודל", color: "#4fa3ff" }, { type: "ground", title: "קרקע", color: "#f5a623" }],
             visibleElements: { legend: true, settingsButton: false } })) },
         { id: "los", label: "קו ראייה", hint: "לחיצה ראשונה: נקודת התצפית. לחיצות נוספות: מטרות. ירוק = נראה, אדום = מוסתר.",
           run: (el) => widget(new LineOfSight({ view, container: el })) },
@@ -301,22 +437,12 @@
       }
 
       // ---- eye-level walk mode ----
-      // Bare-earth heights (ground.json, built from the Drone2Map solution points) keep the eye at a fixed
-      // height above the terrain. There is no collision with walls: walking through buildings is allowed.
-      let groundGrid = null;
-      const loadGround = async () => {
-        if (groundGrid) return groundGrid;
-        const g = await (await fetch("ground.json")).json();
-        g.values = new Int16Array(Uint8Array.from(atob(g.data), (ch) => ch.charCodeAt(0)).buffer);
-        return (groundGrid = g);
-      };
-      const groundAt = (x, y) => { // bilinear, real height (m, EGM96)
-        const g = groundGrid;
-        const c = Math.min(Math.max((x - g.x0) / g.cell, 0), g.cols - 1.001);
-        const r = Math.min(Math.max((g.y1 - y) / g.cell, 0), g.rows - 1.001);
-        const c0 = Math.floor(c), r0 = Math.floor(r), fc = c - c0, fr = r - r0, v = (rr, cc) => g.values[rr * g.cols + cc];
-        const top = v(r0, c0) * (1 - fc) + v(r0, c0 + 1) * fc, bot = v(r0 + 1, c0) * (1 - fc) + v(r0 + 1, c0 + 1) * fc;
-        return g.base + (top * (1 - fr) + bot * fr) / 100;
+      // Terrain height with the same formula as the displayed elevation model (the scene's own elevation sampler
+      // also includes the mesh, so walking would climb onto roofs). No collision with walls.
+      const surfaceAt = (x, y) => {
+        const p = projection.project(new Point({ x, y, spatialReference: sr }), { wkid: 3857 });
+        const h = terrainHeight(demAtWM(p.x, p.y), x, y, terrainScope());
+        return isNaN(h) ? groundAt(x, y) : h;
       };
 
       function walkTool(el) {
@@ -337,9 +463,9 @@
         let walking = false, x = 0, y = 0, heading = view.camera.heading, tilt = 90, eye = 1.7, raf = 0, last = 0, dirty = true, drag = null;
 
         const apply = () => {
-          view.camera = new Camera({ position: new Point({ x, y, z: groundAt(x, y) - GROUND + eye, spatialReference: sr }),
-            heading, tilt, fov: 70 });
-          msg.textContent = `גובה קרקע ${groundAt(x, y).toFixed(1)} מ' · עיניים ${(groundAt(x, y) + eye).toFixed(1)} מ'`;
+          const gz = surfaceAt(x, y);
+          view.camera = new Camera({ position: new Point({ x, y, z: gz + eye, spatialReference: sr }), heading, tilt, fov: 70 });
+          msg.textContent = `גובה קרקע ${gz.toFixed(1)} מ' · עיניים ${(gz + eye).toFixed(1)} מ'`;
           dirty = false;
         };
         const tick = (t) => {
@@ -417,17 +543,19 @@
           event.stopPropagation();
           const hit = await view.hitTest(event, { include: [mesh] });
           const r = hit.results.find((x) => x.mapPoint);
-          const p = r ? r.mapPoint : view.toMap(event);
+          const p = r ? r.mapPoint : (hit.ground && hit.ground.mapPoint) || view.toMap(event);
           if (!p) return;
           const geo = projection.project(p, { wkid: 4326 });
           const fmt = (v, d) => v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+          const gz = surfaceAt(p.x, p.y);
           rows.innerHTML = `
             <tr><td>מזרח (E), UTM 36N</td><td class="ltr">${fmt(p.x, 2)}</td></tr>
             <tr><td>צפון (N), UTM 36N</td><td class="ltr">${fmt(p.y, 2)}</td></tr>
-            <tr><td>גובה (מ', EGM96)</td><td class="ltr">${r ? fmt(p.z + GROUND, 2) : "—"}</td></tr>
+            <tr><td>גובה הנקודה (מ', EGM96)</td><td class="ltr">${p.hasZ ? fmt(p.z, 2) : "—"}</td></tr>
+            <tr><td>גובה הקרקע כאן</td><td class="ltr">${fmt(gz, 2)}</td></tr>
             <tr><td>קו רוחב</td><td class="ltr">${fmt(geo.y, 7)}°</td></tr>
             <tr><td>קו אורך</td><td class="ltr">${fmt(geo.x, 7)}°</td></tr>
-            <tr><td>פגיעה</td><td>${r ? "במודל" : "בקרקע (גובה לא זמין)"}</td></tr>`;
+            <tr><td>פגיעה</td><td>${r ? "במודל" : "בקרקע"}</td></tr>`;
         });
         return () => handle.remove();
       }
